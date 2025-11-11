@@ -1,0 +1,367 @@
+<!--
+File: signature_canvas.html
+Deskripsi: Halaman responsif (mobile-friendly) untuk membuat tanda tangan via canvas (HP / mouse), preview, undo, clear, dan simpan.
+Halaman ini mengirim data tanda tangan (base64 PNG) ke Google Apps Script Web App (doPost) yang akan menyimpan file ke Drive dan menulis link ke Google Sheets.
+
+PENTING: Ganti konstanta `API_URL`, `SPREADSHEET_ID`, dan `SHEET_NAME` di bagian GAS pada file Code.gs (lihat bagian "Google Apps Script (Code.gs)" di bawah).
+
+Cara pakai singkat:
+1. Salin seluruh file ini sebagai `signature_canvas.html` dan buka di browser (atau letakkan di server Anda).
+2. Deploy Google Apps Script (Code.gs) sebagai Web App (Execute as: Me, Who has access: Anyone) dan masukkan URL /exec ke `API_URL` di bagian <script> bawah (baris API_URL).
+3. Ketik nama, buat tanda tangan, tombol "Simpan ke Drive" akan meng-upload tanda tangan dan menambahkan baris baru ke Sheet.
+-->
+
+<!DOCTYPE html>
+<html lang="id">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Tanda Tangan Digital — Canvas</title>
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+    />
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+    <style>
+      :root {
+        --accent: #6c63ff;
+      }
+      body {
+        background: linear-gradient(180deg, #f8f9ff, #ffffff);
+        min-height: 100vh;
+      }
+      .card {
+        border-radius: 14px;
+        box-shadow: 0 8px 30px rgba(18, 18, 50, 0.06);
+      }
+      .canvas-wrap {
+        border: 1px dashed rgba(0, 0, 0, 0.06);
+        border-radius: 8px;
+        padding: 10px;
+        background: #fff;
+      }
+      canvas {
+        touch-action: none;
+        width: 100%;
+        height: 240px;
+        border-radius: 6px;
+      }
+      .small-muted {
+        font-size: 0.85rem;
+        color: #6b6b6b;
+      }
+      .btn-accent {
+        background: var(--accent);
+        color: #fff;
+      }
+      .btn-accent:active,
+      .btn-accent:focus {
+        box-shadow: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container py-4">
+      <div class="row justify-content-center">
+        <div class="col-md-8 col-lg-6">
+          <div class="card p-3">
+            <div class="d-flex align-items-start gap-3">
+              <div class="flex-grow-1">
+                <h4 class="mb-1">Tanda Tangan Digital</h4>
+                <p class="small-muted mb-2">
+                  Buat tanda tangan menggunakan jari (HP) atau mouse. Hasil
+                </p>
+              </div>
+              <!-- <div>
+                <button
+                  id="downloadPNG"
+                  class="btn btn-outline-secondary btn-sm"
+                  title="Unduh PNG"
+                >
+                  Unduh
+                </button>
+              </div> -->
+            </div>
+
+            <div class="mt-2 canvas-wrap">
+              <canvas id="sigCanvas"></canvas>
+            </div>
+
+            <div class="d-flex gap-2 mt-3 flex-wrap">
+              <button id="clearBtn" class="btn btn-secondary">Bersihkan</button>
+              <button id="undoBtn" class="btn btn-outline-secondary">
+                Undo
+              </button>
+              <div class="ms-auto">
+                <label class="small-muted me-2">Ketebalan</label>
+                <input id="thickness" type="range" min="1" max="6" value="2" />
+              </div>
+            </div>
+
+            <hr />
+
+            <form id="metaForm" class="row g-2">
+              <div class="col-12">
+                <label class="form-label">Nama</label>
+                <input
+                  id="nameInput"
+                  class="form-control"
+                  placeholder="Nama lengkap"
+                  required
+                />
+              </div>
+              <div class="col-12 d-flex gap-2">
+                <button id="saveBtn" type="button" class="btn btn-accent">
+                  Simpan ke Drive & Sheet
+                </button>
+                <div id="status" class="align-self-center small-muted">
+                  &nbsp;
+                </div>
+              </div>
+            </form>
+          </div>
+
+          <div class="text-center mt-3 small-muted">
+            <!-- Folder Drive tujuan: <code>1QN7NyQUK1-9_khkQTwaXtMbOkgYmBkGm</code> -->
+          </div>
+          <!-- <div class="text-center small-muted">
+            Spreadsheet:
+            <code>1sYHHtlibwjxqm5oISBfavI6hsIQ-YolJ4CgiRtvNaRQ</code>
+          </div> -->
+        </div>
+      </div>
+    </div>
+
+    <script>
+      // === CONFIG ===
+      // GANTI API_URL dengan URL Web App Anda (Google Apps Script deploy as web app -> /exec)
+      const API_URL =
+        "https://script.google.com/macros/s/AKfycbydmAPQ_XI-E12rWQT5lUHQ-e_KnkRhn5DEddveOxASiXjZaF8erLhR9K8-WFLQwqoz/exec"; // contoh: https://script.google.com/macros/s/AKfy.../exec
+
+      // Helper to select elements
+      const $ = (q) => document.querySelector(q);
+
+      const canvas = document.getElementById("sigCanvas");
+      const ctx = canvas.getContext("2d");
+      let drawing = false;
+      let last = { x: 0, y: 0 };
+      let paths = []; // stack of paths for undo
+
+      function resizeCanvas() {
+        // maintain device pixel ratio for sharpness
+        const ratio = Math.max(window.devicePixelRatio || 1, 1);
+        const w = canvas.clientWidth;
+        const h = 240; // fixed height
+        canvas.width = Math.floor(w * ratio);
+        canvas.height = Math.floor(h * ratio);
+        canvas.style.height = h + "px";
+        ctx.scale(ratio, ratio);
+        redraw();
+      }
+
+      window.addEventListener("resize", resizeCanvas);
+
+      // drawing helpers
+      function getPos(e) {
+        if (e.touches && e.touches.length) e = e.touches[0];
+        const rect = canvas.getBoundingClientRect();
+        return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+      }
+
+      function startDraw(e) {
+        drawing = true;
+        const p = getPos(e);
+        last = p;
+        paths.push([{ x: p.x, y: p.y }]);
+      }
+      function moveDraw(e) {
+        if (!drawing) return;
+        e.preventDefault();
+        const p = getPos(e);
+        const thickness = Number(document.getElementById("thickness").value);
+        const currPath = paths[paths.length - 1];
+        currPath.push({ x: p.x, y: p.y });
+        ctx.lineJoin = ctx.lineCap = "round";
+        ctx.lineWidth = thickness;
+        ctx.beginPath();
+        ctx.moveTo(last.x, last.y);
+        ctx.lineTo(p.x, p.y);
+        ctx.stroke();
+        last = p;
+      }
+      function endDraw(e) {
+        drawing = false;
+      }
+
+      // redraw from paths
+      function redraw() {
+        // clear
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        // set default styles
+        ctx.strokeStyle = "#111";
+        for (const path of paths) {
+          if (!path.length) continue;
+          ctx.beginPath();
+          ctx.moveTo(path[0].x, path[0].y);
+          for (let i = 1; i < path.length; i++)
+            ctx.lineTo(path[i].x, path[i].y);
+          ctx.stroke();
+        }
+      }
+
+      // attach events
+      canvas.addEventListener("mousedown", startDraw);
+      canvas.addEventListener("touchstart", startDraw);
+      window.addEventListener("mousemove", moveDraw);
+      canvas.addEventListener("touchmove", moveDraw, { passive: false });
+      window.addEventListener("mouseup", endDraw);
+      canvas.addEventListener("touchend", endDraw);
+
+      // thickness change
+      document.getElementById("thickness").addEventListener("input", (e) => {
+        ctx.lineWidth = e.target.value;
+      });
+
+      // clear & undo
+      document.getElementById("clearBtn").addEventListener("click", () => {
+        paths = [];
+        redraw();
+      });
+      document.getElementById("undoBtn").addEventListener("click", () => {
+        paths.pop();
+        redraw();
+      });
+
+      // initial canvas style
+      ctx.strokeStyle = "#111";
+      ctx.lineWidth = 2;
+
+      // download button
+      document.getElementById("downloadPNG").addEventListener("click", () => {
+        const dataURL = canvas.toDataURL("image/png");
+        const a = document.createElement("a");
+        a.href = dataURL;
+        a.download = "signature.png";
+        a.click();
+      });
+
+      // save to Drive (via GAS)
+      document.getElementById("saveBtn").addEventListener("click", async () => {
+        const name = document.getElementById("nameInput").value.trim();
+        const status = document.getElementById("status");
+        if (!name) {
+          Swal.fire(
+            "Nama wajib diisi!",
+            "Masukkan nama sebelum menyimpan.",
+            "warning"
+          );
+          return;
+        }
+        if (!paths.length) {
+          Swal.fire(
+            "Tanda tangan kosong!",
+            "Silakan buat tanda tangan dulu.",
+            "info"
+          );
+          return;
+        }
+
+        status.textContent = "Mengunggah...";
+
+        const dataURL = canvas.toDataURL("image/png");
+        const base64 = dataURL.split(",")[1];
+        const form = new FormData();
+        const filename =
+          "ttd_" +
+          name.replace(/[^a-z0-9]/gi, "_").toLowerCase() +
+          "_" +
+          Date.now() +
+          ".png";
+
+        form.append("data", base64);
+        form.append("mimetype", "image/png");
+        form.append("filename", filename);
+        form.append("name", name);
+
+        try {
+          // Tidak baca response JSON (agar tidak kena CORS)
+          await fetch(API_URL, { method: "POST", body: form, mode: "no-cors" });
+
+          Swal.fire({
+            icon: "success",
+            title: "Berhasil!",
+            text: "Tanda tangan berhasil disimpan ke Drive & Sheet.",
+            confirmButtonText: "OK",
+          });
+
+          // Reset setelah sukses
+          document.getElementById("nameInput").value = "";
+          paths = [];
+          redraw();
+          status.textContent = "";
+        } catch (err) {
+          console.error(err);
+          Swal.fire("Gagal!", "Terjadi kesalahan saat mengunggah.", "error");
+          status.textContent = "Gagal mengunggah.";
+        }
+      });
+
+      // init
+      resizeCanvas();
+    </script>
+
+    <!--
+  ==========================
+  Google Apps Script (Code.gs)
+  ==========================
+  Buat project baru di https://script.google.com/, buat file Code.gs dan paste code di bawah.
+  Ganti SPREADSHEET_ID dan TARGET_FOLDER_ID.
+  Deploy -> New deployment -> Web app (Execute as: Me, Who has access: Anyone)
+
+  Notes: jika anda ingin membatasi akses, pilih who has access sesuai kebutuhan. Jika memilih "Anyone", maka request anonymous dari browser akan diizinkan.
+  -->
+
+    <!--
+  // --- Code.gs (paste ke project Google Apps Script) ---
+  const SPREADSHEET_ID = '1sYHHtlibwjxqm5oISBfavI6hsIQ-YolJ4CgiRtvNaRQ'; // GANTI jika perlu
+  const TARGET_FOLDER_ID = '1QN7NyQUK1-9_khkQTwaXtMbOkgYmBkGm'; // folder tujuan
+  const SHEET_NAME = 'Sheet1';
+
+  function doGet(e){
+    return ContentService.createTextOutput('Use POST to upload');
+  }
+
+  function doPost(e){
+    try{
+      // Received as form fields: data (base64), mimetype, filename, name
+      const data = e.parameter.data;
+      const mimetype = e.parameter.mimetype || 'image/png';
+      const filename = e.parameter.filename || ('ttd_' + Date.now() + '.png');
+      const name = e.parameter.name || '';
+
+      if(!data){
+        return ContentService.createTextOutput('No data').setMimeType(ContentService.MimeType.TEXT);
+      }
+
+      const decoded = Utilities.base64Decode(data);
+      const blob = Utilities.newBlob(decoded, mimetype, filename);
+      const folder = DriveApp.getFolderById(TARGET_FOLDER_ID);
+      const file = folder.createFile(blob);
+
+      // make file readable by anyone with link (optional)
+      try{ file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW); }catch(e){}
+
+      const fileUrl = file.getUrl();
+
+      // append to sheet: Timestamp, Nama, File URL
+      const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+      const sh = ss.getSheetByName(SHEET_NAME) || ss.getSheets()[0];
+      sh.appendRow([new Date(), name, fileUrl]);
+
+      return ContentService.createTextOutput(fileUrl).setMimeType(ContentService.MimeType.TEXT);
+    }catch(err){
+      return ContentService.createTextOutput('ERROR: ' + err.toString()).setMimeType(ContentService.MimeType.TEXT);
+    }
+  }
+  --></body>
+</html>
